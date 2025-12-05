@@ -24,6 +24,11 @@ import mapclassify
 
 logger = logging.getLogger(__name__)
 
+class NoFeaturesError(Exception):
+    def __init__(self, message="No features have been provided."):
+        self.message = message
+        super().__init__(self.message)
+
 
 # TODO: check mandatory options (eg. res or grid have to be not None
 def read_vector(vector, res=None, column=None, value=1., compute_area=False,
@@ -31,7 +36,7 @@ def read_vector(vector, res=None, column=None, value=1., compute_area=False,
                 bounds=None,
                 grid=None, grid_mask=True,
                 all_touched=True, merge_alg=rasterio.enums.MergeAlg.replace, fillvalue=0., nodata=np.nan,
-                use_centroid=False, query=None):
+                use_centroid=False, query=None, evalexpr=None):
     """
     Constructor to create a geospatial DataArray object from a vector file with input geometry burned in.
 
@@ -92,6 +97,9 @@ def read_vector(vector, res=None, column=None, value=1., compute_area=False,
     gdf = gdf[~gdf.geometry.isna()].copy()
     if query is not None:
         gdf.query(query, inplace=True)
+    if evalexpr is not None:
+        column = 'evalcolumn'
+        gdf[column] = gdf.eval(evalexpr)
     if use_centroid:
         gdf.geometry = gdf.geometry.centroid
     return read_df(gdf, res, column, value, compute_area,
@@ -209,6 +217,8 @@ def read_raster(raster, band=1, epsg=None, grid=None, resampling=Resampling.bili
 
 def rasterize_features(da, features, all_touched=True, merge_alg=rasterio.enums.MergeAlg.replace, fillvalue=0.,
                        grid_mask=True):
+    if len(features)==0:
+        raise NoFeaturesError()
     #TODO: better manage dtype
     #TODO: features and da CRSs have to be the same
     r = rasterio.features.rasterize(
@@ -281,15 +291,15 @@ class RgAccessor:
     # def add(self, array):
     #     np.add(self, array, self)
 
-    # TODO: to update
     def patch(self, raster):
-        condition = (self._obj == 0) & (raster != 0)
-        self._obj[condition] = raster[condition]
+        _raster = self._obj.copy()
+        _raster = _raster.where(_raster, raster)
+        return _raster
 
-    # TODO: to update
     def patch_max(self, raster):
-        np.maximum(self, raster, self)
-
+        _raster = self._obj.copy()
+        _raster.values = xr.where(_raster.drop_vars("band") > raster.drop_vars("band"), _raster, raster).values
+        return _raster
 
     def test(self):
         return True
@@ -357,8 +367,15 @@ class RgAccessor:
                                     # output_core_dims=[[]],
                                     kwargs=_kwargs
                                     )
-        # TODO: make nodata check more robust: 
+        # TODO: make nodata check more robust:
         return rgauss.where(~self._obj.isnull())
+
+    def truncate(self, max_value=1):
+        clipped = (self._obj
+                   .where(self._obj <= max_value, max_value)
+                   .where(self._obj.notnull())
+                   )
+        return clipped
 
     def plotmap(self,
                 legend=False,
